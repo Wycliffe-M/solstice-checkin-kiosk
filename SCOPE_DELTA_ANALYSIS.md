@@ -90,3 +90,70 @@ Confirms the pivot did not silently break anything the original spec required:
 - Pre-pivot implementation: git tag `pre-pivot-v1` (commit `2814c52`)
 - Post-pivot implementation: git tag `post-pivot-v1` (commit `ddbe020`)
 - Full diff of the refactor: `git diff pre-pivot-v1 post-pivot-v1`
+
+### Diff summary (`git diff --stat pre-pivot-v1 post-pivot-v1`)
+
+app.py | 151 +++++++++++++++++++++++++++++++++------------------
+mock_queue.py | 74 +++++++++++++++++++++++++
+mock_vendor.py | 51 -----------------
+templates/kiosk.html | 44 +++++++++++++--
+4 files changed, 210 insertions(+), 110 deletions(-)
+
+
+`mock_vendor.py` shows as fully deleted (51 lines removed, 0 added) — confirming
+the obsolete synchronous code was actually removed, not left running alongside
+the new implementation. `mock_queue.py` is a wholly new file (74 lines added,
+0 removed) — the new async publishing mechanism. `app.py` shows the heaviest
+churn (151 lines changed) since the core check-in logic itself needed the
+real refactor, not just a config change.
+
+### Excerpt: the duplicate-scan guard, before vs after
+
+This is the clearest single proof that the refactor was structural, not
+cosmetic — the guard condition itself had to change shape, and the blocking
+vendor call was replaced with a non-blocking queue publish:
+
+```diff
+     attendee = attendees[attendee_id]
+
+-    # --- Duplicate-scan protection ---
+-    if attendee["checked_in"]:
++    # --- Duplicate-scan protection (scan-time guard) ---
++    if attendee["status"] in ("pending", "checked_in"):
+         flash(
+-            f"{attendee['name']} ({attendee_id}) is already checked in. "
+-            f"No badge will be printed again.",
++            f"{attendee['name']} ({attendee_id}) already has a print job "
++            f"in progress or completed. No new badge will be queued.",
+             "warning"
+         )
+         return redirect(url_for("kiosk_home"))
+
+-    # --- Not yet checked in: call the vendor's print API synchronously ---
+-    try:
+-        response = requests.post(
+-            VENDOR_PRINT_URL,
+-            json={"attendee_id": attendee_id},
+-            timeout=5  # sensible timeout for a synchronous call
+-        )
+-    except requests.exceptions.RequestException as e:
+-        flash(f"Could not reach printer service: {e}", "error")
+-        return redirect(url_for("kiosk_home"))
+-
+-    if response.status_code == 200 and response.json().get("status") == "success":
+-        # Only NOW, after print success, do we mark them as checked in.
+-        attendee["checked_in"] = True
+-        flash(f"{attendee['name']} ({attendee_id}) - Checked In! Badge printed.", "success")
+-    else:
+-        flash(f"Print failed for {attendee['name']} ({attendee_id}). Please try again.", "error")
++    # --- Not yet checked in: publish to the queue and return immediately ---
++    job_id = publish_print_job(attendee_id)
++    attendee["status"] = "pending"
++    attendee["job_id"] = job_id
+```
+
+Note the pre-pivot version's `requests.post(...)` call **blocked** on the
+vendor's response before deciding anything. The post-pivot version never
+calls the vendor directly at all — it publishes a job and returns
+immediately, deferring the actual "checked in" decision entirely to the
+`/webhook/print-complete` route (see Section 4).
