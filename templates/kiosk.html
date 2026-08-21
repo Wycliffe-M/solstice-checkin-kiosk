@@ -44,16 +44,19 @@
         .flash.success { background: #d4edda; color: #155724; }
         .flash.warning { background: #fff3cd; color: #856404; }
         .flash.error   { background: #f8d7da; color: #721c24; }
+        .flash.info    { background: #d1ecf1; color: #0c5460; }
 
         .attendee-list li {
             margin-bottom: 6px;
         }
-        .status-in { color: green; font-weight: bold; }
-        .status-out { color: #888; }
+        .status-in      { color: green; font-weight: bold; }
+        .status-out     { color: #888; }
+        .status-pending { color: #b8860b; font-weight: bold; }
     </style>
 </head>
 <body>
     <h1>Solstice Events - Check-In Kiosk</h1>
+    <p style="color:#666; font-size: 14px;">Async mode - badges print via message queue + webhook confirmation</p>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
@@ -79,12 +82,14 @@
 
     <div class="card">
         <h2>Attendee Status</h2>
-        <ul class="attendee-list">
+        <ul class="attendee-list" id="attendee-list">
             {% for id, info in attendees.items() %}
-                <li>
+                <li id="status-{{ id }}">
                     {{ id }} - {{ info.name }}:
-                    {% if info.checked_in %}
+                    {% if info.status == "checked_in" %}
                         <span class="status-in">Checked In</span>
+                    {% elif info.status == "pending" %}
+                        <span class="status-pending">Pending (waiting for printer)...</span>
                     {% else %}
                         <span class="status-out">Not checked in</span>
                     {% endif %}
@@ -92,5 +97,34 @@
             {% endfor %}
         </ul>
     </div>
+
+    <script>
+        // Lightweight polling: check /status every 1.5s and update the
+        // page live, so "Pending" flips to "Checked In" automatically
+        // once the webhook confirms - without a manual page refresh.
+        const labels = {
+            "checked_in": '<span class="status-in">Checked In</span>',
+            "pending": '<span class="status-pending">Pending (waiting for printer)...</span>',
+            "not_checked_in": '<span class="status-out">Not checked in</span>'
+        };
+
+        async function pollStatus() {
+            try {
+                const res = await fetch("{{ url_for('status_poll') }}");
+                const data = await res.json();
+                for (const [id, status] of Object.entries(data)) {
+                    const el = document.getElementById("status-" + id);
+                    if (el) {
+                        const name = el.textContent.split(":")[0];
+                        el.innerHTML = name + ": " + labels[status];
+                    }
+                }
+            } catch (e) {
+                // Silently ignore transient errors - next poll will retry
+            }
+        }
+
+        setInterval(pollStatus, 1500);
+    </script>
 </body>
 </html>
